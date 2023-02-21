@@ -1,4 +1,5 @@
 # following the kaparthy series
+import math
 
 import torch
 import torch.nn as nn
@@ -13,8 +14,8 @@ eval_interval = 300
 learning_rate = 1e-4
 device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_embed = 32
-n_head = 6
+n_embed = 384
+n_head = 6  # every head is n_embed // n_head dimensional
 n_layer = 6
 dropout = 0.2
 # ------------
@@ -65,6 +66,10 @@ def estimate_loss():
     return out
 
 
+def new_gelu(x):
+    """Gaussian Error Linear Units (GELU) activation function"""
+    return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+
 class Head(nn.Module):
     """The Attention Head!!!"""
 
@@ -105,14 +110,14 @@ class MultiHeadAttention(nn.Module):
         out = self.dropout(self.projection(out))  # apply linear transformation for residual pathway
         return out
 
-class FeedForward(nn.Module):
+class MLP(nn.Module):
     """The 'Feed Forward Network' part of the Transformer (also multilayered perceptron)"""
 
     def __init__(self, n_embed):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_embed, 4 * n_embed),  # higher inner-layer dimensionality as per attention paper
-            nn.ReLU(),
+            new_gelu(),
             nn.Linear(4 * n_embed, n_embed),  # projection layer for residual pathway
             nn.Dropout(dropout)
         )
@@ -127,13 +132,13 @@ class Block(nn.Module):
         super().__init__()
         head_size = n_embed // n_head
         self.self_attention = MultiHeadAttention(n_head, head_size)
-        self.feed_foward = FeedForward(n_embed)
+        self.mlp = MLP(n_embed)
         self.ln_1 = nn.LayerNorm(n_embed)
         self.ln_2 = nn.LayerNorm(n_embed)  # read more abt layernorm, not sure how it plays into performance
     
     def forward(self, x: torch.Tensor):
         x = x + self.self_attention(self.ln_1(x))  # normalize features before selfattn and ffwd
-        x = x + self.feed_foward(self.ln_2(x))  # residual connections for better optimization
+        x = x + self.mlp(self.ln_2(x))  # residual connections for better optimization
         return x
 
 class BigramLanguageModel(nn.Module):
