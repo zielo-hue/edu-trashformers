@@ -91,16 +91,23 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size=head_size) for _ in range(num_heads)])
+        self.projection = nn.Linear(n_embed, n_embed)
     
     def forward(self, x: torch.Tensor):
-        return torch.cat([head(x) for head in self.heads], dim=-1)
+        out = torch.cat([head(x) for head in self.heads], dim=-1)
+        out = self.projection(out)  # apply linear transformation for residual pathway
+        return out
 
 class FeedForward(nn.Module):
     """The 'Feed Forward Network' part of the Transformer (also multilayered perceptron)"""
 
     def __init__(self, n_embed):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(n_embed, n_embed), nn.ReLU())
+        self.net = nn.Sequential(
+            nn.Linear(n_embed, 4 * n_embed),  # higher inner-layer dimensionality as per attention paper
+            nn.ReLU(),
+            nn.Linear(4 * n_embed, n_embed)  # projection layer for residual pathway
+        )
     
     def forward(self, x: torch.Tensor):
         return self.net(x)
@@ -115,8 +122,8 @@ class Block(nn.Module):
         self.feed_foward = FeedForward(n_embed)
     
     def forward(self, x: torch.Tensor):
-        x = self.self_attention(x)
-        x = self.feed_foward(x)
+        x = x + self.self_attention(x)
+        x = x + self.feed_foward(x)  # residual connections for better optimization
         return x
 
 class BigramLanguageModel(nn.Module):
