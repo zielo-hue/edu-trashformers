@@ -5,15 +5,18 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 # hyperparameters
-batch_size = 32 # how many independent sequences will we process in parallel?
-block_size = 8 # what is the maximum context length for predictions?
+batch_size = 64 # how many independent sequences will we process in parallel?
+block_size = 256 # what is the maximum context length for predictions?
 head_size = 16
 max_iters = 5000
 eval_interval = 300
-learning_rate = 1e-3
+learning_rate = 1e-4
 device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embed = 32
+n_head = 6
+n_layer = 6
+dropout = 0.2
 # ------------
 
 torch.manual_seed(1337)
@@ -71,15 +74,18 @@ class Head(nn.Module):
         self.query = nn.Linear(n_embed, head_size, bias=False)
         self.value = nn.Linear(n_embed, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+
+        self.dropout = nn.Dropout(dropout)  # randomly prevent nodes from communicating (0) to prevent overfitting (read dropout paper for more details)
     
     def forward(self, x: torch.Tensor):
         B, T, C = x.shape
         k = self.key(x)  # (B, T, C)
         q = self.query(x)  # (B, T, C)
         # compute attention scores; arent dimensions same as 1, 2?
-        wei = q @ k.transpose(-2, -1)  # (B, T, C) @ (B, C, T) => (B, T, T)
+        wei = q @ k.transpose(-2, -1) * C**-0.5  # (B, T, C) @ (B, C, T) => (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
+        wei = self.dropout(wei)
         v = self.value(x)
         # weighted aggregation
         out = wei @ v  # (B, T, T) @ (B, T, C) => (B, T, C)
@@ -92,10 +98,11 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size=head_size) for _ in range(num_heads)])
         self.projection = nn.Linear(n_embed, n_embed)
+        self.dropout = nn.Dropout(dropout)
     
     def forward(self, x: torch.Tensor):
         out = torch.cat([head(x) for head in self.heads], dim=-1)
-        out = self.projection(out)  # apply linear transformation for residual pathway
+        out = self.dropout(self.projection(out))  # apply linear transformation for residual pathway
         return out
 
 class FeedForward(nn.Module):
@@ -106,7 +113,8 @@ class FeedForward(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(n_embed, 4 * n_embed),  # higher inner-layer dimensionality as per attention paper
             nn.ReLU(),
-            nn.Linear(4 * n_embed, n_embed)  # projection layer for residual pathway
+            nn.Linear(4 * n_embed, n_embed),  # projection layer for residual pathway
+            nn.Dropout(dropout)
         )
     
     def forward(self, x: torch.Tensor):
@@ -120,10 +128,12 @@ class Block(nn.Module):
         head_size = n_embed // n_head
         self.self_attention = MultiHeadAttention(n_head, head_size)
         self.feed_foward = FeedForward(n_embed)
+        self.ln_1 = nn.LayerNorm(n_embed)
+        self.ln_2 = nn.LayerNorm(n_embed)  # read more abt layernorm, not sure how it plays into performance
     
     def forward(self, x: torch.Tensor):
-        x = x + self.self_attention(x)
-        x = x + self.feed_foward(x)  # residual connections for better optimization
+        x = x + self.self_attention(self.ln_1(x))  # normalize features before selfattn and ffwd
+        x = x + self.feed_foward(self.ln_2(x))  # residual connections for better optimization
         return x
 
 class BigramLanguageModel(nn.Module):
@@ -133,11 +143,8 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
-        self.blocks = nn.Sequential(
-            Block(n_embed, n_head=4),
-            Block(n_embed, n_head=4),
-            Block(n_embed, n_head=4)
-        )
+        self.blocks = nn.Sequential(*[Block(n_embed, n_head) for _ in range(n_layer)])
+        self.ln_final = nn.LayerNorm(n_embed)
         self.lm_head = nn.Linear(n_embed, vocab_size)
 
     def forward(self, idx: torch.Tensor, targets=None):
@@ -148,6 +155,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
         x = token_emb + pos_emb  # (B, T, C) b/c added dimension -> broadcasted across each batch
         x = self.blocks(x)  # (B, T, C) now with attention computed, use attention information
+        x = self.ln_final(x)
         logits = self.lm_head(x)  # (B,T,vocab_size)
 
         if targets is None:
