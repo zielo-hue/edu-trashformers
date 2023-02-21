@@ -115,15 +115,16 @@ class MLP(nn.Module):
 
     def __init__(self, n_embed):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_embed, 4 * n_embed),  # higher inner-layer dimensionality as per attention paper
-            new_gelu(),
-            nn.Linear(4 * n_embed, n_embed),  # projection layer for residual pathway
-            nn.Dropout(dropout)
-        )
+        self.c_fc = nn.Linear(n_embed, 4 * n_embed)  # higher inner-layer dimensionality as per attention paper
+        self.c_proj = nn.Linear(4 * n_embed, n_embed)  # projection layer for residual pathway
+        self.dropout = nn.Dropout(dropout)
     
     def forward(self, x: torch.Tensor):
-        return self.net(x)
+        x = self.c_fc(x)
+        x = new_gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
 
 class Block(nn.Module):
     """The Transformer Block: attention (communication) then computation"""
@@ -192,6 +193,8 @@ class BigramLanguageModel(nn.Module):
 
 model = BigramLanguageModel()
 m = model.to(device)
+# show number of parameters
+print(sum(p.numel() for p in m.parameters())/1e6, "M parameters")
 
 # create a PyTorch optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
